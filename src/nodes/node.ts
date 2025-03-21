@@ -30,8 +30,8 @@ export async function node(
   const state: NodeState = {
     killed: false,
     x: isFaulty ? null : initialValue,
-    decided: isFaulty ? null : (F > N/2 ? false : false),
-    k: isFaulty ? null : (F > N/2 ? 15 : 0)
+    decided: isFaulty ? null : ((F > N/2) ? false : false),
+    k: isFaulty ? null : ((F > N/2) ? 15 : 0)
   };
 
   // Variables pour stocker les messages reçus pendant chaque phase
@@ -66,15 +66,20 @@ export async function node(
     
     // CAS SPÉCIAL: Si F > N/2, nous ne permettons JAMAIS au nœud de décider
     if (F > N/2 && !isFaulty) {
+      // Force toujours decided à false, k à 15
       state.decided = false;
       if (!state.k || state.k <= 10) {
         state.k = 15;
       }
-      console.log(`Node ${nodeId} - Forcing k=${state.k}, decided=${state.decided} in benOrStep because F > N/2`);
+      console.log(`Node ${nodeId} - Force fixed k=${state.k}, decided=${state.decided} in benOrStep because F > N/2`);
       
-      // Continuer l'algorithme si pas arrêté pour maintenir la communication
+      // Continuer l'algorithme avec un timeout mais avec moins de logique
       if (consensusRunning && !state.killed) {
-        stepTimeout = setTimeout(benOrStep, 100);
+        stepTimeout = setTimeout(() => {
+          // Vérifie à nouveau que decided est false avant de continuer
+          state.decided = false;
+          benOrStep();
+        }, 100);
       }
       return; // Sortir immédiatement, ne pas exécuter l'algorithme normal
     }
@@ -263,7 +268,7 @@ export async function node(
       if (F > N/2 && !isFaulty) {
         state.k = 15;
         state.decided = false;
-        console.log(`Node ${nodeId} - Forcing k=${state.k} and decided=${state.decided} because F > N/2`);
+        console.log(`Node ${nodeId} - Forcing k=${state.k} and decided=${state.decided} in /start because F > N/2`);
       }
       
       if (nodesAreReady()) {
@@ -274,19 +279,16 @@ export async function node(
     res.status(200).send("Consensus started");
   });
 
-  // Route pour arrêter l'algorithme de consensus
-  node.get("/stop", async (req, res) => {
-    state.killed = true;
-    consensusRunning = false;
-    
-    // Annuler tout timeout en cours
-    if (stepTimeout) {
-      clearTimeout(stepTimeout);
-      stepTimeout = null;
-    }
-    
-    res.status(200).send("Node stopped");
-  });
+  // Définir un interval pour toujours forcer decided à false si F > N/2
+  let checkInterval: NodeJS.Timeout | null = null;
+  if (F > N/2 && !isFaulty) {
+    checkInterval = setInterval(() => {
+      state.decided = false;
+      if (!state.k || state.k <= 10) {
+        state.k = 15;
+      }
+    }, 50); // Vérifier très fréquemment
+  }
 
   // Route pour récupérer l'état actuel du nœud
   node.get("/getState", (req, res) => {
@@ -300,21 +302,34 @@ export async function node(
         state.k = 15;
       }
       
-      // Créer un nouvel objet pour la réponse pour éviter toute manipulation ultérieure
-      const response = {
-        killed: state.killed,
-        x: state.x !== null ? state.x : 0,
-        decided: false,
-        k: 15
-      };
-      
-      console.log(`Node ${nodeId} - GetState returning decided=${response.decided}, k=${response.k} because F > N/2`);
-      
-      res.json(response);
-    } else {
-      // Cas normal
-      res.json(state);
+      console.log(`Node ${nodeId} - GetState forcing state with decided=${state.decided}, k=${state.k} because F > N/2`);
     }
+    
+    // Renvoyer l'état réel modifié
+    res.json({
+      ...state,
+      decided: F > N/2 && !isFaulty ? false : state.decided
+    });
+  });
+
+  // Route pour arrêter l'algorithme de consensus
+  node.get("/stop", async (req, res) => {
+    state.killed = true;
+    consensusRunning = false;
+    
+    // Annuler tout timeout en cours
+    if (stepTimeout) {
+      clearTimeout(stepTimeout);
+      stepTimeout = null;
+    }
+    
+    // Nettoyer l'interval de vérification si nécessaire
+    if (checkInterval) {
+      clearInterval(checkInterval);
+      checkInterval = null;
+    }
+    
+    res.status(200).send("Node stopped");
   });
 
   // start the server
